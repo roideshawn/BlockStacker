@@ -12,25 +12,24 @@ from renderer import Renderer
 from settings_menu import SettingsMenu
 
 def main() -> None:
+    # --- ANTI-CRACKING AUDIO PRE-INIT ---
+    # 44100 Hz, 16-bit, Stereo, 2048 buffer size (stops clipping/stutter)
+    pygame.mixer.pre_init(44100, -16, 2, 2048)
     pygame.init()
     
     # ==========================================
     # --- TRUE FULLSCREEN & DYNAMIC SCALING ---
     # ==========================================
-    # 1. Ask the OS for the monitor's native resolution
     info = pygame.display.Info()
     config.SCREEN_WIDTH = info.current_w
     config.SCREEN_HEIGHT = info.current_h
     
-    # 2. Scale the blocks so the grid fills 85% of the screen height perfectly
+    # Scale the blocks so the grid fills 85% of the screen height perfectly
     config.CELL_SIZE = int((config.SCREEN_HEIGHT * 0.85) / config.GRID_ROWS)
 
-    # 3. Boot into Hardware-Accelerated Fullscreen
     flags = pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE
     screen = pygame.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT), flags)
-    # ==========================================
     
-    # Title uses the specific aesthetic palette name
     pygame.display.set_caption(f"Block Stacker - {config.ACTIVE_THEME.palette_name}")
     
     icon = pygame.Surface((32, 32))
@@ -40,7 +39,6 @@ def main() -> None:
 
     clock = pygame.time.Clock()
 
-    # --- Initialize Engine Components ---
     board = Board()
     bot = Bot()
     stats = Stats()
@@ -49,6 +47,12 @@ def main() -> None:
     renderer = Renderer(screen)
     menu = SettingsMenu(screen)
     
+    # Start the ambient music for the initial theme
+    audio.play_ambient()
+    
+    # Milestone tracker for dynamic palette shifting
+    next_theme_milestone = 50 
+
     def spawn_piece() -> Piece:
         shape_name = random.choice(list(SHAPES.keys()))
         return Piece(shape_name, config.GRID_COLS // 2 - 1, 0)
@@ -66,6 +70,9 @@ def main() -> None:
     running = True
     while running:
         delta_time = clock.tick(config.TARGET_FPS)
+        
+        # --- AUDIO BREATHE UPDATE ---
+        audio.update()
 
         # ==========================================
         # 1. MENU STATE (Paused)
@@ -77,14 +84,45 @@ def main() -> None:
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     menu.is_open = False
                 
-                # Intercept signals from the Settings Menu
                 action = menu.handle_event(event)
                 
                 if action == "quit":
                     running = False
+                    
+                # --- APPLY CUSTOM THEME INJECTION ---
+                elif action == "apply_custom_theme":
+                    # Force a config reload of the custom themes to grab the newest one
+                    config.load_custom_themes()
+                    
+                    # Search the newly loaded themes for the one you just named
+                    for t in config.ZEN_THEMES:
+                        if t.palette_name == menu.last_applied_theme_name:
+                            config.ACTIVE_THEME = t
+                            break
+                    
+                    # Ensure the old global toggles are OFF so the Theme object handles the images
+                    config.CUSTOM_BG_ENABLED = False
+                    config.CUSTOM_BOARD_BG_ENABLED = False
+                    
+                    menu.update_labels()
+                    pygame.display.set_caption(f"Block Stacker - {config.ACTIVE_THEME.palette_name}")
+                    audio.play_ambient(force_refresh=True)
+                    
+                    # Reset the board to showcase the new theme cleanly
+                    board = Board()
+                    stats.reset()
+                    next_theme_milestone = 50 
+                    current_piece = spawn_piece()
+                    next_piece = spawn_piece()
+                    target_rot, target_x = bot.get_best_move(board, current_piece)
+                    rotations_done = 0
+                    bot_aligned = False
                 
                 elif action == "cycle_theme":
-                    # Random Theme Pooling
+                    # Ensure the old global toggles are OFF so the Theme object handles the images
+                    config.CUSTOM_BG_ENABLED = False
+                    config.CUSTOM_BOARD_BG_ENABLED = False
+                    
                     if config.ACTIVE_THEME.name == "zen":
                         config.ACTIVE_THEME = random.choice(config.SATISFYING_THEMES)
                     else:
@@ -92,10 +130,11 @@ def main() -> None:
                         
                     menu.update_labels()
                     pygame.display.set_caption(f"Block Stacker - {config.ACTIVE_THEME.palette_name}")
+                    audio.play_ambient(force_refresh=True)
                     
-                    # Wipe the board cleanly to apply new colors smoothly
                     board = Board()
                     stats.reset()
+                    next_theme_milestone = 50 
                     current_piece = spawn_piece()
                     next_piece = spawn_piece()
                     target_rot, target_x = bot.get_best_move(board, current_piece)
@@ -103,15 +142,23 @@ def main() -> None:
                     bot_aligned = False
                 
                 elif action == "cycle_font":
-                    # Loop through available fonts and trigger a render update
                     config.ACTIVE_FONT_INDEX = (config.ACTIVE_FONT_INDEX + 1) % len(config.AVAILABLE_FONTS)
                     menu.update_labels()
                     renderer.update_fonts() 
+                    
+                elif action == "toggle_audio":
+                    if not config.MASTER_AUDIO_ENABLED:
+                        pygame.mixer.music.fadeout(500)
+                    else:
+                        audio.play_ambient()
+                        
+                elif action == "load_ambient":
+                    # Force the new track to play immediately upon upload
+                    audio.play_ambient(force_refresh=True)
 
-            # Draw background game, then menu overlay
             renderer.render(board, current_piece, next_piece, stats, particles)
             menu.draw()
-            pygame.display.flip()  # Safe to flip here while the game is paused
+            pygame.display.flip()  
             continue  
 
         # ==========================================
@@ -121,15 +168,12 @@ def main() -> None:
         bot_time += delta_time 
         particles.update()
 
-        # --- Dynamic Fluid Resistance Math ---
         dynamic_multiplier = config.ACTIVE_THEME.fall_multiplier
         if config.ACTIVE_THEME.name == "zen":
-            # Start fast, slow down as it sinks deeper into the fluid
             dynamic_multiplier = min(config.ACTIVE_THEME.fall_multiplier, 0.15 + (current_piece.y * 0.25))
         
         current_base_speed = config.BASE_FALL_SPEED * dynamic_multiplier
 
-        # --- Input & Event Handling ---
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -137,7 +181,6 @@ def main() -> None:
                 if event.key == pygame.K_ESCAPE:
                     menu.is_open = True 
                 
-                # Manual Player Controls (Only active if bot is toggled OFF)
                 if not menu.bot_enabled:
                     orig_x, orig_y = current_piece.x, current_piece.y
                     
@@ -161,12 +204,10 @@ def main() -> None:
                     if not board.is_valid_position(current_piece):
                         current_piece.x, current_piece.y = orig_x, orig_y
 
-        # --- AI BOT LOGIC (Simultaneous Execution) ---
         if menu.bot_enabled:
             if not bot_aligned and bot_time >= config.BOT_MOVE_DELAY:
                 bot_time = 0
                 
-                # Rotate and Move X concurrently
                 if rotations_done < target_rot:
                     current_piece.rotate()
                     if not board.is_valid_position(current_piece):
@@ -186,34 +227,30 @@ def main() -> None:
                 if rotations_done == target_rot and current_piece.x == target_x:
                     bot_aligned = True
             
-            # Diagonal swooping integration
             fall_speed = config.BOT_SOFT_DROP_SPEED * dynamic_multiplier
         else:
             fall_speed = current_base_speed
 
-        # --- GRAVITY & TERRAIN HUGGING ---
         if fall_time >= fall_speed:
             fall_time = 0
             current_piece.y += 1
             
             if not board.is_valid_position(current_piece):
                 current_piece.y -= 1 
-                
-                # Terrain Hugging: Slide horizontally across blocks if not aligned yet
                 bot_is_sliding = menu.bot_enabled and not bot_aligned
                 
                 if bot_is_sliding:
                     orig_x = current_piece.x
                     current_piece.x += 1 if current_piece.x < target_x else -1
                     if not board.is_valid_position(current_piece):
-                        bot_is_sliding = False # Trapped in a corner, force lock
+                        bot_is_sliding = False 
                     current_piece.x = orig_x
                 
                 if not bot_is_sliding:
                     board.lock_piece(current_piece)
-                    audio.play("drop")
                     
-                    # Impact Physics Trigger (Localized squish)
+                    # --- DROP AUDIO & PHYSICS ---
+                    audio.play_sfx("drop")
                     blocks = current_piece.get_blocks()
                     if blocks:
                         lowest_y = max(b[1] for b in blocks)
@@ -223,22 +260,37 @@ def main() -> None:
                     cleared_data = board.clear_lines()
                     if cleared_data:
                         stats.add_lines(len(cleared_data))
-                        audio.play("clear")
                         
-                        # Massive Shockwave Trigger for line clears
+                        # --- CLEAR AUDIO & PHYSICS ---
+                        audio.play_sfx("clear")
                         renderer.trigger_impact(config.GRID_COLS / 2, cleared_data[0][0], force=2.5)
                         
                         for y_index, row_colors in cleared_data:
                             particles.spawn_line_clear(y_index, row_colors, renderer.offset_x, renderer.offset_y)
-                    
+
+                        # ==========================================
+                        # --- SEAMLESS EVOLUTION (THEME SHIFT) ---
+                        # ==========================================
+                        if stats.lines >= next_theme_milestone:
+                            next_theme_milestone += 50
+                            
+                            if config.ACTIVE_THEME.name == "zen":
+                                config.ACTIVE_THEME = random.choice(config.ZEN_THEMES)
+                            else:
+                                config.ACTIVE_THEME = random.choice(config.SATISFYING_THEMES)
+                                
+                            menu.update_labels()
+                            pygame.display.set_caption(f"Block Stacker - {config.ACTIVE_THEME.palette_name}")
+                            audio.play_ambient() 
+                            
                     current_piece = next_piece
                     next_piece = spawn_piece()
                     
                     if not board.is_valid_position(current_piece):
                         print("Game Over! Auto-restarting...")
-                        audio.play("gameover")
                         board = Board()
                         stats.reset()
+                        next_theme_milestone = 50
                         current_piece = spawn_piece() 
                         next_piece = spawn_piece()
 
@@ -246,13 +298,9 @@ def main() -> None:
                     rotations_done = 0
                     bot_aligned = False
 
-        # --- MASTER RENDER CALL ---
-        # Calculate exactly how far between grid snaps we are for buttery smooth interpolation
         fall_progress = min(1.0, fall_time / fall_speed) if fall_speed > 0 else 0.0
         renderer.render(board, current_piece, next_piece, stats, particles, fall_progress)
 
-        # THIS IS THE BOSS FLIP! 
-        # By doing it here, we prevent the double-flip flickering glitch.
         pygame.display.flip()
 
     pygame.quit()

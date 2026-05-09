@@ -1,0 +1,12 @@
+{
+    "custom_themes": [
+        {
+            "name": "test",
+            "bg_image_path": "userdata/images/0e13340f.png",
+            "board_image_path": "userdata/images/7f7270f9.jpg",
+            "ambient_track": null,
+            "clear_sound": null,
+            "drop_sound": null
+        }
+    ]
+}

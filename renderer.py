@@ -1,6 +1,7 @@
 import pygame
 import config
 import math
+import random
 from pieces import Piece
 from board import Board
 from stats import Stats
@@ -10,13 +11,17 @@ from typing import Tuple
 class Renderer:
     def __init__(self, screen: pygame.Surface):
         self.screen = screen
-        
         self.board_pixel_width = config.GRID_COLS * config.CELL_SIZE
         
-        self.offset_x = (config.SCREEN_WIDTH - self.board_pixel_width) // 2
-        self.offset_y = (config.SCREEN_HEIGHT - (config.GRID_ROWS * config.CELL_SIZE)) // 2 
+        self.base_offset_x = (config.SCREEN_WIDTH - self.board_pixel_width) // 2
+        self.base_offset_y = (config.SCREEN_HEIGHT - (config.GRID_ROWS * config.CELL_SIZE)) // 2 
+        self.offset_x = self.base_offset_x
+        self.offset_y = self.base_offset_y
         
+        self.trauma = 0.0  
         self.impacts = []
+        self.shockwaves = [] # --- NEW: Manages expanding rings of light
+        
         self.smooth_x = 0.0
         self.active_piece_ref = None
 
@@ -25,9 +30,25 @@ class Renderer:
                                           int(config.SCREEN_HEIGHT / self.bloom_scale)))
         
         self.glass_layer = pygame.Surface((config.SCREEN_WIDTH, config.SCREEN_HEIGHT), pygame.SRCALPHA)
+        self.vignette_surf = self._create_vignette() 
 
         self.image_cache = {}
         self.update_fonts()
+
+    def _create_vignette(self) -> pygame.Surface:
+        w, h = 200, 200  
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        cx, cy = w / 2, h / 2
+        max_dist = math.hypot(cx, cy)
+        
+        for y in range(h):
+            for x in range(w):
+                dist = math.hypot(x - cx, y - cy)
+                ratio = min(1.0, dist / max_dist)
+                alpha = int(255 * (ratio ** 2.5)) 
+                surf.set_at((x, y), (0, 0, 0, alpha))
+                
+        return pygame.transform.smoothscale(surf, (config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
 
     def update_fonts(self) -> None:
         font_name = config.AVAILABLE_FONTS[config.ACTIVE_FONT_INDEX]
@@ -39,7 +60,6 @@ class Renderer:
             self.value_font = pygame.font.SysFont("consolas", 28)
 
     def _draw_background(self) -> None:
-        """Draws the Outer Window Background."""
         theme = config.ACTIVE_THEME
         path_to_load = config.CUSTOM_BG_PATH if config.CUSTOM_BG_ENABLED else theme.bg_image_path
         
@@ -67,7 +87,6 @@ class Renderer:
                     
                     self.image_cache[path_to_load] = final_surf
                 except Exception as e:
-                    print(f"Warning: Could not load image {path_to_load}: {e}")
                     self.image_cache[path_to_load] = None 
 
             if self.image_cache[path_to_load]:
@@ -77,7 +96,6 @@ class Renderer:
         self.screen.fill(theme.bg_color)
 
     def _draw_board_background(self) -> None:
-        """Draws the Inner Board Background (Solid or perfectly cropped Image)."""
         theme = config.ACTIVE_THEME
         path_to_load = config.CUSTOM_BOARD_BG_PATH if config.CUSTOM_BOARD_BG_ENABLED else theme.board_image_path
         
@@ -109,22 +127,36 @@ class Renderer:
                     
                     self.image_cache[path_to_load] = final_surf
                 except Exception as e:
-                    print(f"Warning: Could not load image {path_to_load}: {e}")
                     self.image_cache[path_to_load] = None 
 
             if self.image_cache[path_to_load]:
                 self.screen.blit(self.image_cache[path_to_load], (self.offset_x, self.offset_y))
                 return
 
-        # Fallback to Solid Board Color
         pygame.draw.rect(self.screen, theme.board_bg_color, board_rect)
 
     def trigger_impact(self, grid_x: float, grid_y: float, force: float = 1.0) -> None:
         self.impacts.append({
-            'x': grid_x, 
-            'y': grid_y, 
-            'time': pygame.time.get_ticks(), 
-            'force': force
+            'x': grid_x, 'y': grid_y, 
+            'time': pygame.time.get_ticks(), 'force': force
+        })
+        self.trauma = min(1.0, self.trauma + (force * 0.2))
+        
+        # --- NEW: Spawn an expanding light shockwave ---
+        # The higher the force (e.g. 4-line clear), the bigger the wave
+        pixel_x = self.base_offset_x + (grid_x * config.CELL_SIZE)
+        pixel_y = self.base_offset_y + (grid_y * config.CELL_SIZE)
+        
+        target_radius = (config.CELL_SIZE * 4.0) * force
+        if config.ACTIVE_THEME.name == "satisfying":
+            target_radius *= 1.5 # Huge splash in satisfying mode
+            
+        self.shockwaves.append({
+            'x': pixel_x, 'y': pixel_y,
+            'radius': config.CELL_SIZE * 0.5,
+            'max_radius': target_radius,
+            'thickness': int(8 * force),
+            'alpha': 255
         })
 
     def _get_ghost_y(self, board: Board, current_piece: Piece) -> int:
@@ -144,7 +176,6 @@ class Renderer:
         max_radius = int(size * 0.4) if config.ACTIVE_THEME.name == "zen" else int(size * 0.15)
         
         top_touch, right_touch, bottom_touch, left_touch = neighbors
-        
         tl = 0 if (top_touch or left_touch) else max_radius
         tr = 0 if (top_touch or right_touch) else max_radius
         bl = 0 if (bottom_touch or left_touch) else max_radius
@@ -157,7 +188,6 @@ class Renderer:
         
         if config.ACTIVE_THEME.name == "zen" and not is_ghost:
             current_time = pygame.time.get_ticks()
-            
             for imp in self.impacts:
                 t = current_time - imp['time']
                 dist = math.sqrt((grid_c - imp['x'])**2 + (grid_r - imp['y'])**2)
@@ -227,19 +257,35 @@ class Renderer:
         current_time = pygame.time.get_ticks()
         self.impacts = [imp for imp in self.impacts if current_time - imp['time'] < 1000]
 
-        # 1. Base Layer (Outer Window)
+        self.trauma = max(0.0, self.trauma - 0.015) 
+        shake = (self.trauma ** 2) * 25.0 * config.ACTIVE_THEME.shake_multiplier
+        
+        cam_x, cam_y = 0.0, 0.0
+        if shake > 0:
+            cam_x += random.uniform(-1.0, 1.0) * shake
+            cam_y += random.uniform(-1.0, 1.0) * shake
+            
+        if config.ACTIVE_THEME.name == "zen":
+            cam_x += math.sin(current_time / 1800.0) * 4.0
+            cam_y += math.cos(current_time / 2300.0) * 3.0
+            
+        self.offset_x = self.base_offset_x + int(cam_x)
+        self.offset_y = self.base_offset_y + int(cam_y)
+
+        # 1. Base Layers
         self._draw_background()
         self.bloom_surf.fill((0, 0, 0)) 
         self.glass_layer.fill((0, 0, 0, 0))
-
-        # 2. Inner Board Layer
         self._draw_board_background()
 
-        # 3. Draw Grid Lines Over the Board
+        # 2. NEW: Ambient Nebula Layer (Drawn behind the grid and blocks!)
+        particles.draw_ambient(self.screen, self.bloom_surf, self.bloom_scale)
+
+        # 3. Grid Lines
         board_rect = pygame.Rect(self.offset_x, self.offset_y, self.board_pixel_width, config.GRID_ROWS * config.CELL_SIZE)
         pygame.draw.rect(self.screen, config.ACTIVE_THEME.grid_color, board_rect, 2)
 
-        # 4. Draw Solid Blocks to the GLASS LAYER
+        # 4. Solid Blocks (GLASS LAYER)
         for r in range(config.GRID_ROWS):
             for c in range(config.GRID_COLS):
                 if board.grid[r][c] is not None:
@@ -254,7 +300,7 @@ class Renderer:
                     self._draw_3d_block(self.glass_layer, pixel_x, pixel_y, board.grid[r][c], 
                                         grid_r=r, grid_c=c, neighbors=(top, right, bottom, left))
 
-        # 5. Draw Active Piece to the GLASS LAYER
+        # 5. Active Piece (GLASS LAYER)
         piece_blocks = current_piece.get_blocks()
         if self.active_piece_ref is not current_piece:
             self.smooth_x = float(current_piece.x)
@@ -284,11 +330,11 @@ class Renderer:
             self._draw_3d_block(self.glass_layer, pixel_x, pixel_y, current_piece.color, 
                                 grid_r=block_y, grid_c=block_x, neighbors=(top, right, bottom, left))
 
-        # 6. Stamp Tinted Glass Layer over the board
+        # 6. Apply Tinted Glass
         self.glass_layer.set_alpha(config.ACTIVE_THEME.block_alpha)
         self.screen.blit(self.glass_layer, (0, 0))
 
-        # 7. Draw Ghost Piece (Direct to screen)
+        # 7. Ghost Piece
         ghost_y = self._get_ghost_y(board, current_piece)
         original_y = current_piece.y
         current_piece.y = ghost_y
@@ -298,15 +344,52 @@ class Renderer:
             self._draw_3d_block(self.screen, pixel_x, pixel_y, current_piece.color, is_ghost=True)
         current_piece.y = original_y  
 
-        # 8. Particles & Additive Bloom Pass
+        # ==========================================
+        # --- NEW: KINETIC SHOCKWAVE PASS ---
+        # ==========================================
+        for sw in self.shockwaves[:]:
+            # Rapid ease-out expansion
+            sw['radius'] += (sw['max_radius'] - sw['radius']) * 0.15 
+            sw['alpha'] -= 8  # Quick fade
+            
+            if sw['alpha'] <= 0:
+                self.shockwaves.remove(sw)
+            else:
+                sw_surf = pygame.Surface((int(sw['max_radius']*2), int(sw['max_radius']*2)), pygame.SRCALPHA)
+                
+                # Draw sharp, glowing ring
+                color = (255, 255, 255, max(0, sw['alpha']))
+                pygame.draw.circle(sw_surf, color, (int(sw['max_radius']), int(sw['max_radius'])), int(sw['radius']), max(1, sw['thickness']))
+                
+                # We factor in camera offset so shockwaves shake with the board!
+                screen_x = (sw['x'] - self.base_offset_x) + self.offset_x
+                screen_y = (sw['y'] - self.base_offset_y) + self.offset_y
+                self.screen.blit(sw_surf, (screen_x - sw['max_radius'], screen_y - sw['max_radius']), special_flags=pygame.BLEND_RGB_ADD)
+                
+                # Add to bloom surf for extreme glow
+                b_color = (150, 150, 150)
+                pygame.draw.circle(self.bloom_surf, b_color, (int(screen_x / self.bloom_scale), int(screen_y / self.bloom_scale)), int(sw['radius'] / self.bloom_scale), max(1, int(sw['thickness'] / self.bloom_scale)))
+        # ==========================================
+
+        # 8. Particles & Additive Bloom
         particles.draw(self.screen, self.bloom_surf, self.bloom_scale)
         scaled_bloom = pygame.transform.smoothscale(self.bloom_surf, (config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
         self.screen.blit(scaled_bloom, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
 
-        # 9. Real-time Subsurface Glass Reflection
+        # 9. Chromatic Aberration
+        ab_mult = config.ACTIVE_THEME.aberration_multiplier
+        if self.trauma > 0.15 and ab_mult > 0:
+            ab_shift = int((self.trauma ** 2) * 18 * ab_mult)
+            red_surf = scaled_bloom.copy()
+            red_surf.fill((255, 0, 0), special_flags=pygame.BLEND_RGB_MULT)
+            blue_surf = scaled_bloom.copy()
+            blue_surf.fill((0, 150, 255), special_flags=pygame.BLEND_RGB_MULT)
+            self.screen.blit(red_surf, (-ab_shift, 0), special_flags=pygame.BLEND_RGB_ADD)
+            self.screen.blit(blue_surf, (ab_shift, 0), special_flags=pygame.BLEND_RGB_ADD)
+
+        # 10. Subsurface Reflection
         floor_y = self.offset_y + (config.GRID_ROWS * config.CELL_SIZE)
         capture_height = config.SCREEN_HEIGHT - floor_y  
-        
         if capture_height > 0:
             capture_rect = pygame.Rect(self.offset_x, floor_y - capture_height, self.board_pixel_width, capture_height)
             if capture_rect.top >= 0 and capture_rect.bottom <= self.screen.get_height():
@@ -314,19 +397,23 @@ class Renderer:
                 reflection = pygame.transform.flip(board_bottom, False, True)
                 reflection.set_alpha(110) 
                 self.screen.blit(reflection, (self.offset_x, floor_y))
-                
                 fade_surf = pygame.Surface((self.board_pixel_width, capture_height), pygame.SRCALPHA)
                 bg_color = config.ACTIVE_THEME.bg_color
                 for y in range(capture_height):
                     ratio = y / capture_height
                     alpha = min(255, int(math.pow(ratio, 1.5) * 255) + 30)
                     pygame.draw.line(fade_surf, (*bg_color, alpha), (0, y), (self.board_pixel_width, y))
-                
                 self.screen.blit(fade_surf, (self.offset_x, floor_y))
                 pygame.draw.line(self.screen, config.ACTIVE_THEME.grid_color, 
                                  (self.offset_x, floor_y), 
                                  (self.offset_x + self.board_pixel_width, floor_y), 3)
 
+        # 11. Vignette Pass
+        if config.ACTIVE_THEME.vignette_alpha > 0:
+            self.vignette_surf.set_alpha(config.ACTIVE_THEME.vignette_alpha)
+            self.screen.blit(self.vignette_surf, (0, 0))
+
+        # 12. UI Pass
         self._draw_ui(stats, next_piece)
 
     def _draw_text(self, text: str, font: pygame.font.Font, color: tuple, x: int, y: int) -> None:
@@ -335,10 +422,8 @@ class Renderer:
 
     def _draw_ui(self, stats: Stats, next_piece: Piece) -> None:
         text_c = config.ACTIVE_THEME.text_color
-        
         left_panel_x = self.offset_x - 200 
         if left_panel_x < 20: left_panel_x = 20 
-        
         ui_y = self.offset_y + 40
 
         self._draw_text("SCORE", self.title_font, text_c, left_panel_x, ui_y)
@@ -347,10 +432,8 @@ class Renderer:
         self._draw_text(str(stats.level), self.value_font, text_c, left_panel_x, ui_y + 160)
 
         right_panel_x = self.offset_x + self.board_pixel_width + 50
-        
         self._draw_text("LINES", self.title_font, text_c, right_panel_x, ui_y)
         self._draw_text(str(stats.lines), self.value_font, text_c, right_panel_x, ui_y + 40)
-
         self._draw_text("NEXT", self.title_font, text_c, right_panel_x, ui_y + 120)
         
         preview_x = right_panel_x
@@ -366,6 +449,4 @@ class Renderer:
             bottom = (block_x, block_y + 1) in next_blocks
             left = (block_x - 1, block_y) in next_blocks
             right = (block_x + 1, block_y) in next_blocks
-            
-            self._draw_3d_block(self.glass_layer, pixel_x, pixel_y, next_piece.color, 
-                                neighbors=(top, right, bottom, left))
+            self._draw_3d_block(self.glass_layer, pixel_x, pixel_y, next_piece.color, neighbors=(top, right, bottom, left))
